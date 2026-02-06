@@ -43,16 +43,25 @@ export enum CoderAgentEvent {
   CitationEvent = 'citation',
 }
 
-export interface ClientTool {
+export interface FrontendTool {
   name: string;
   description: string;
-  parameterSchema: unknown;
+  parameterSchema: Record<string, unknown>;
+}
+
+export interface FrontendToolCallResult {
+  call_id: string;
+  tool_name: string;
+  success: boolean;
+  approved: boolean;
+  result?: string | null;
 }
 
 export interface AgentSettings {
   kind: CoderAgentEvent.StateAgentSettingsEvent;
   workspacePath: string;
-  clientTools?: ClientTool[];
+  autoExecute: boolean;
+  frontendTools?: FrontendTool[];
 }
 
 export interface ToolCallConfirmation {

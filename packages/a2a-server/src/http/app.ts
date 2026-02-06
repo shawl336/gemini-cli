@@ -316,6 +316,50 @@ export async function createApp() {
       }
       res.json({ metadata: await wrapper.task.getMetadata() });
     });
+
+    expressApp.post('/tasks/:taskId/tools/:toolName/result', async (req, res) => {
+      // 接收客户端工具执行结果
+      const taskId = req.params.taskId;
+      const toolName = req.params.toolName;
+      const { callId, success, output, error } = req.body;
+
+      if (!callId) {
+        res.status(400).send({ error: 'Missing callId in request body' });
+        return;
+      }
+
+      let wrapper = agentExecutor.getTask(taskId);
+      if (!wrapper) {
+        const sdkTask = await taskStoreForExecutor.load(taskId);
+        if (sdkTask) {
+          wrapper = await agentExecutor.reconstruct(sdkTask);
+        }
+      }
+
+      if (!wrapper) {
+        res.status(404).send({ error: 'Task not found' });
+        return;
+      }
+
+      try {
+        await wrapper.task.handleClientToolResult(toolName, callId, {
+          success: success !== false,
+          output,
+          error,
+        });
+        res.status(200).json({ success: true });
+      } catch (error) {
+        logger.error(
+          `[CoreAgent] Error handling client tool result for ${toolName}:`,
+          error,
+        );
+        const errorMessage =
+          error instanceof Error
+            ? error.message
+            : 'Unknown error handling tool result';
+        res.status(500).send({ error: errorMessage });
+      }
+    });
     return expressApp;
   } catch (error) {
     logger.error('[CoreAgent] Error during startup:', error);

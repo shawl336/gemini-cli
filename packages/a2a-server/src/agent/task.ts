@@ -55,7 +55,9 @@ import type {
   ThoughtSummary,
   Citation,
 } from '../types.js';
+import { FrontendToolWrapper } from '../custom_tools/client_tool_wrapper.js';
 import type { PartUnion, Part as genAiPart } from '@google/genai';
+
 
 type UnionKeys<T> = T extends T ? keyof T : never;
 
@@ -1025,6 +1027,12 @@ export class Task {
         traceId,
       ),
     );
+    
+    // 2. 发送独立的 Message 事件（用于 A2AAgent.run_stream() 等简化 API）
+    // 根据 A2A 协议，Message 事件可以直接发布，eventBus 会将其包装成正确的 SSE 格式
+    logger.info(`[Task] Publishing Message event: messageId=${message.messageId}, text="${content}"`);
+    this.eventBus?.publish(message);
+    logger.info(`[Task] Message event published successfully.`);
   }
 
   _sendThought(content: ThoughtSummary, traceId?: string): void {
@@ -1073,5 +1081,36 @@ export class Task {
     this.eventBus?.publish(
       this._createStatusUpdateEvent(this.taskState, citationEvent, message),
     );
+  }
+
+  /**
+   * Handle tool execution result from client
+   */
+  async handleClientToolResult(
+    toolName: string,
+    callId: string,
+    result: { success: boolean; output?: string; error?: string },
+  ): Promise<void> {
+    const toolRegistry = await this.config.getToolRegistry();
+    const tool = toolRegistry.getTool(toolName);
+
+    if (!tool || !(tool instanceof FrontendToolWrapper)) {
+      logger.warn(
+        `[Task] Received result for unknown or non-client tool: ${toolName}`,
+      );
+      return;
+    }
+
+    if (result.success) {
+      (tool as FrontendToolWrapper).handleToolResult(callId, {
+        llmContent: result.output || '',
+        returnDisplay: result.output || '',
+      });
+    } else {
+      (tool as FrontendToolWrapper).handleToolError(
+        callId,
+        new Error(result.error || 'Unknown error executing client tool'),
+      );
+    }
   }
 }

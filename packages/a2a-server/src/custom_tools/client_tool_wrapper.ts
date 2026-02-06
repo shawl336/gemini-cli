@@ -9,7 +9,7 @@ import { Kind, BaseDeclarativeTool, BaseToolInvocation } from '@google/gemini-cl
 import type { ExecutionEventBus } from '@a2a-js/sdk/server';
 import { v4 as uuidv4 } from 'uuid';
 import { logger } from '../utils/logger.js';
-import type { ClientTool } from '../types.js';
+import type { FrontendTool } from '../types.js';
 import { CoderAgentEvent } from '../types.js';
 
 type ToolParams = Record<string, unknown>;
@@ -31,7 +31,7 @@ type ToolParams = Record<string, unknown>;
  * 5. handleClientResult()或handleClientError()被调用来处理结果
  * 6. Promise被resolve/reject，工具调用完成
  */
-class ClientToolInvocation extends BaseToolInvocation<ToolParams, ToolResult> {
+class FrontendToolInvocation extends BaseToolInvocation<ToolParams, ToolResult> {
   private callId: string;
   private eventBus: ExecutionEventBus;
   private taskId: string;
@@ -39,6 +39,7 @@ class ClientToolInvocation extends BaseToolInvocation<ToolParams, ToolResult> {
   private resolveCallback?: (result: ToolResult) => void;
   private rejectCallback?: (error: Error) => void;
   private timeoutId?: NodeJS.Timeout;
+  private result?: ToolResult;
 
   constructor(
     params: ToolParams,
@@ -70,10 +71,40 @@ class ClientToolInvocation extends BaseToolInvocation<ToolParams, ToolResult> {
     _updateOutput?: (output: string) => void,
   ): Promise<ToolResult> {
     return new Promise<ToolResult>((resolve, reject) => {
+      // If the frontend results are already saved, use it directly
+      let result: ToolResult
+      if (this.result) {
+        result = this.result
+      } else {
+        result = {
+          llmContent: "Failed to execute frontend tool",
+          returnDisplay: "Failed to execute frontend tool",
+          error: {
+            message: "Failed to execute frontend tool",
+          },
+        }        
+      }
+
+      resolve(result);
+      this.result = undefined; // reset the result for next calls  
+    }
+  )}
+
+        /**
+   * 执行客户端工具调用
+   * 当Gemini决定调用客户端工具时，会调用此方法
+   * 此方法会通过eventBus发送工具调用请求给客户端，然后等待客户端返回执行结果
+   */
+  async execute_old(
+    _signal: AbortSignal,
+    _updateOutput?: (output: string) => void,
+  ): Promise<ToolResult> {
+    return new Promise<ToolResult>((resolve, reject) => {
+      // If the frontend results are already saved, use it directly
       this.resolveCallback = resolve;
       this.rejectCallback = reject;
 
-      // 设置超时（30秒），如果客户端在规定时间内没有返回结果，则超时失败
+    // 设置超时（60秒），如果客户端在规定时间内没有返回结果，则超时失败
       this.timeoutId = setTimeout(() => {
         if (this.rejectCallback) {
           this.rejectCallback(
@@ -82,7 +113,7 @@ class ClientToolInvocation extends BaseToolInvocation<ToolParams, ToolResult> {
             ),
           );
         }
-      }, 30000);
+      }, 60000);
 
       // ⭐ 服务端发送工具调用请求给客户端 - 打印日志位置
       // 当服务端需要调用客户端工具时，会在这里打印日志并发送事件
@@ -144,6 +175,11 @@ class ClientToolInvocation extends BaseToolInvocation<ToolParams, ToolResult> {
     });
   }
 
+
+  saveClientResult(result: ToolResult): void {
+    this.result = result;
+  }
+
   /**
    * Called when client returns tool execution result
    */
@@ -182,28 +218,28 @@ class ClientToolInvocation extends BaseToolInvocation<ToolParams, ToolResult> {
 /**
  * Wrapper for client-provided tools that delegates execution to the client.
  */
-export class ClientToolWrapper extends BaseDeclarativeTool<
+export class FrontendToolWrapper extends BaseDeclarativeTool<
   Record<string, unknown>,
   ToolResult
 > {
   private eventBus?: ExecutionEventBus;
   private taskId?: string;
   private contextId?: string;
-  private pendingInvocations: Map<string, ClientToolInvocation> = new Map();
+  private pendingInvocations: Map<string, FrontendToolInvocation> = new Map();
 
   constructor(
-    clientTool: ClientTool,
+    frontendTool: FrontendTool,
     messageBus: MessageBus,
     eventBus?: ExecutionEventBus,
     taskId?: string,
     contextId?: string,
   ) {
     super(
-      clientTool.name,
-      clientTool.name,
-      clientTool.description,
+      frontendTool.name,
+      frontendTool.name,
+      frontendTool.description,
       Kind.Other,
-      clientTool.parameterSchema,
+      frontendTool.parameterSchema,
       messageBus,
       false, // isOutputMarkdown
       false, // canUpdateOutput
@@ -234,11 +270,11 @@ export class ClientToolWrapper extends BaseDeclarativeTool<
   ): ToolInvocation<Record<string, unknown>, ToolResult> {
     if (!this.eventBus || !this.taskId || !this.contextId) {
       throw new Error(
-        'ClientToolWrapper context not set. Call setContext() before using the tool.',
+        'FrontendToolWrapper context not set. Call setContext() before using the tool.',
       );
     }
 
-    const invocation = new ClientToolInvocation(
+    const invocation = new FrontendToolInvocation(
       params,
       messageBus,
       toolName || this.name,
@@ -252,6 +288,20 @@ export class ClientToolWrapper extends BaseDeclarativeTool<
     this.pendingInvocations.set(invocation.getCallId(), invocation);
 
     return invocation;
+  }
+
+  // For frontend tool results, which are pre-stored and returned immediately at invocation
+  // this trick makes the tool calls pretentiously called on the Gemini side
+  saveToolResult(callId: string, result: ToolResult): void {
+    const invocation = this.pendingInvocations.get(callId);
+    if (invocation) {
+      invocation.saveClientResult(result);
+      this.pendingInvocations.delete(callId);
+    } else {
+      logger.warn(
+        `[ClientTool] Received result for unknown tool call: ${callId}`,
+      );
+    }
   }
 
   /**
