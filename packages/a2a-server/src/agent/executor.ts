@@ -24,6 +24,7 @@ import type {
   StateChange,
   AgentSettings,
   PersistedStateMetadata,
+  FrontendToolCallResult,
 } from '../types.js';
 import {
   CoderAgentEvent,
@@ -36,6 +37,7 @@ import { loadExtensions } from '../config/extension.js';
 import { Task } from './task.js';
 import { requestStorage } from '../http/requestStorage.js';
 import { pushTaskStateFailed } from '../utils/executor_utils.js';
+import { FrontendToolWrapper } from '../custom_tools/cutsom_tool_wrapper.js';
 
 /**
  * Provides a wrapper for Task. Passes data from Task to SDKTask.
@@ -128,10 +130,147 @@ export class CoderAgentExecutor implements AgentExecutor {
     runtimeTask.taskState = persistedState._taskState;
     await runtimeTask.geminiClient.initialize();
 
+    // Register client tools if provided
+    if (agentSettings.frontendTools && agentSettings.frontendTools.length > 0) {
+      await this.registerFrontendTools(
+        runtimeTask,
+        agentSettings.frontendTools,
+        eventBus,
+        sdkTask.id,
+        contextId,
+      );
+    }
+
     const wrapper = new TaskWrapper(runtimeTask, agentSettings);
     this.tasks.set(sdkTask.id, wrapper);
     logger.info(`Task ${sdkTask.id} reconstructed from store.`);
     return wrapper;
+  }
+
+  /**
+   * Register client-provided tools to the task's tool registry
+   */
+  private async registerFrontendTools(
+    task: Task,
+    frontendTools: Array<{
+      name: string;
+      description: string;
+      parameterSchema: Record<string, unknown>;
+    }>,
+    eventBus?: ExecutionEventBus,
+    taskId?: string,
+    contextId?: string,
+  ): Promise<void> {
+    if (!eventBus || !taskId || !contextId) {
+      logger.warn(
+        '[CoderAgentExecutor] Cannot register client tools: missing eventBus, taskId, or contextId',
+      );
+      return;
+    }
+
+    const toolRegistry = task.config.getToolRegistry();
+    const messageBus = toolRegistry.getMessageBus();
+    logger.info(
+      `[CoderAgentExecutor] Registering ${frontendTools.length} client tools`,
+    );
+
+    for (const frontendTool of frontendTools) {
+      // Check if tool with same name already exists
+      const existingTool = toolRegistry.getTool(frontendTool.name);
+      if (existingTool) {
+        logger.warn(
+          `[CoderAgentExecutor] Tool "${frontendTool.name}" already exists. Client tool will override it.`,
+        );
+      }
+
+      // Create wrapper and set context
+      const wrapper = new FrontendToolWrapper(
+        frontendTool,
+        messageBus,
+        eventBus,
+        taskId,
+        contextId,
+      );
+      wrapper.setContext(eventBus, taskId, contextId);
+
+      // Register the tool
+      toolRegistry.registerTool(wrapper);
+      logger.info(
+        `[CoderAgentExecutor] Registered client tool: ${frontendTool.name}`,
+      );
+    }
+
+    // Update the geminiClient's tools configuration so that tools are passed to LLM
+    await task.geminiClient.setTools();
+    logger.info(
+      `[CoderAgentExecutor] Updated geminiClient tools configuration with ${frontendTools.length} client tools`,
+    );
+  }
+
+  /**
+   * Process frontend tool call results from the message metadata
+   */
+  private async processFrontendToolCallResults(
+    task: Task,
+    toolCallResults: FrontendToolCallResult[],
+  ): Promise<void> {
+    const toolRegistry = task.config.getToolRegistry();
+
+    for (const resultItem of toolCallResults) {
+      const { call_id, tool_name, success, approved, result } = resultItem;
+
+      logger.info(
+        `[CoderAgentExecutor] Processing frontend tool result: ${tool_name} (callId: ${call_id}, success: ${success}, approved: ${approved})`,
+      );
+
+      const tool = toolRegistry.getTool(tool_name);
+
+      if (!tool) {
+        logger.warn(
+          `[CoderAgentExecutor] Tool "${tool_name}" not found in registry for callId: ${call_id}`,
+        );
+        continue;
+      }
+
+      if (!(tool instanceof FrontendToolWrapper)) {
+        logger.warn(
+          `[CoderAgentExecutor] Tool "${tool_name}" is not a FrontendToolWrapper, skipping result for callId: ${call_id}`,
+        );
+        continue;
+      }
+
+      // Type assertion after instanceof check
+      const frontendTool = tool;
+
+      // Save the result to the tool instance
+      // If not approved, the Gemini will not invoke the tool and no process is needed here
+      if (!approved) {
+        continue;
+      }
+
+      if (success) {
+        // Success case: approved and no error
+        frontendTool.saveToolResult(call_id, {
+          llmContent: result || '',
+          returnDisplay: result || '',
+        });
+        logger.info(
+          `[CoderAgentExecutor] Successfully saved result for tool "${tool_name}" (callId: ${call_id})`,
+        );
+      } else {
+        // Error case: either success=false or error is present
+        frontendTool.saveToolResult(call_id, {
+          llmContent: result || 'Unknown error executing frontend tool',
+          returnDisplay: result || 'Unknown error executing frontend tool',
+          error: {
+            message: result || 'Unknown error executing frontend tool',
+          },
+        });
+        logger.info(
+          `[CoderAgentExecutor] Saved error result for tool "${tool_name}" (callId: ${call_id})`,
+        );
+      }
+    }
   }
 
   async createTask(
@@ -150,6 +289,17 @@ export class CoderAgentExecutor implements AgentExecutor {
       agentSettings.autoExecute,
     );
     await runtimeTask.geminiClient.initialize();
+
+    // Register client tools if provided
+    if (agentSettings.frontendTools && agentSettings.frontendTools.length > 0) {
+      await this.registerFrontendTools(
+        runtimeTask,
+        agentSettings.frontendTools,
+        eventBus,
+        taskId,
+        contextId,
+      );
+    }
 
     const wrapper = new TaskWrapper(runtimeTask, agentSettings);
     this.tasks.set(taskId, wrapper);
@@ -385,9 +535,14 @@ export class CoderAgentExecutor implements AgentExecutor {
       }
     } else {
       logger.info(`[CoderAgentExecutor] Creating new task ${taskId}.`);
-      const agentSettings = userMessage.metadata?.[
-        'coderAgent'
-      ] as AgentSettings;
+      const agentSettings = userMessage.metadata?.['coderAgent'] as AgentSettings;
+      // Support both 'clientTools' and 'availableTools' for backward compatibility
+      if (agentSettings.frontendTools) {
+        logger.info(
+          `[CoderAgentExecutor] Converted availableTools to clientTools: ${agentSettings.frontendTools.length} tools`,
+        );
+      }
+
       try {
         wrapper = await this.createTask(
           taskId,
@@ -436,6 +591,22 @@ export class CoderAgentExecutor implements AgentExecutor {
         `[CoderAgentExecutor] Attempted to execute task ${taskId} which is already in state ${currentTask.taskState}. Ignoring.`,
       );
       return;
+    }
+
+    // Handle frontend tool call results if present in the message or request metadata
+    // Store the frontend tool call results to the ToolCall instance and they can will be
+    // return instantly at invoke time.
+    const agentSettings = userMessage.metadata?.['coderAgent'] as AgentSettings;
+    const toolCallResults = agentSettings.frontendToolCallResults;
+    if (
+      toolCallResults &&
+      Array.isArray(toolCallResults) &&
+      toolCallResults.length > 0
+    ) {
+      logger.info(
+        `[CoderAgentExecutor] Processing ${toolCallResults.length} frontend tool call results`,
+      );
+      await this.processFrontendToolCallResults(currentTask, toolCallResults);
     }
 
     if (this.executingTasks.has(taskId)) {
