@@ -33,7 +33,10 @@ import { WriteFileTool } from '../tools/write-file.js';
 import { WebFetchTool } from '../tools/web-fetch.js';
 import { MemoryTool, setGeminiMdFilename } from '../tools/memoryTool.js';
 import { WebSearchTool } from '../tools/web-search.js';
-import { AskUserTool } from '../tools/ask-user.js';
+// @lx-TODO: Use the simplified AskUserTool that accepts only text and yesno questions in place of the original "AskUserTool".
+// Because the frontend does not support the Choice UI yet. Switch back to the original AskUserTool in the future
+// import { AskUserTool } from '../tools/ask-user.js';
+import { AskUserTool } from '../tools/ask-user-text-only.js';
 import { ExitPlanModeTool } from '../tools/exit-plan-mode.js';
 import { EnterPlanModeTool } from '../tools/enter-plan-mode.js';
 import { GeminiClient } from '../core/client.js';

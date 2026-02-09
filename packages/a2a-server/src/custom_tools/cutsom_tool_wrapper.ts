@@ -73,22 +73,11 @@ class FrontendToolInvocation extends BaseToolInvocation<
     _signal: AbortSignal,
     _updateOutput?: (output: string) => void,
   ): Promise<ToolResult> {
-    logger.info(
-      `[FrontendTool] execute: ${this._toolName} (existing result: ${this.result ? 'EXISTS' : 'UNDEFINED'})`,
-    );
-
     // Check if result was already saved
-    if (this.result === undefined) {
-      // Result might have arrived after invocation was created
-      // Check the wrapper for any pending results
-      logger.info(
-        `[FrontendTool] No result in invocation, checking wrapper for pending results`,
-      );
-      const pendingResult = this.wrapper.getAndRemoveAnyPendingResult();
-      if (pendingResult) {
-        logger.info(`[FrontendTool] Found pending result in wrapper, using it`);
-        this.result = pendingResult;
-      }
+    const pendingResult = this.wrapper.getAndRemoveAnyPendingResult();
+    if (pendingResult) {
+      logger.info(`[FrontendTool] Found pending result in wrapper, using it`);
+      this.result = pendingResult;
     }
 
     // If still no result, return error
@@ -107,9 +96,7 @@ class FrontendToolInvocation extends BaseToolInvocation<
 
     const result = this.result;
     this.result = undefined; // reset the result for next calls
-    logger.info(
-      `[FrontendTool] Returning result: ${JSON.stringify(result).substring(0, 100)}`,
-    );
+
     return result;
   }
 }
